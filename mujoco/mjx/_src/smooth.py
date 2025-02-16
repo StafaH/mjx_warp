@@ -2,6 +2,7 @@ import warp as wp
 from . import math
 from . import types
 
+TILE_THREADS = 64
 
 def kinematics(m: types.Model, d: types.Data):
   """Forward kinematics."""
@@ -16,65 +17,163 @@ def kinematics(m: types.Model, d: types.Data):
     d.ximat[worldid, 0] = wp.identity(n=3, dtype=wp.float32)
 
   @wp.kernel
-  def _level(m: types.Model, d: types.Data, leveladr: int):
+  def _level(
+          leveladr: int,
+          m_body_tree: wp.array(dtype=wp.int32, ndim=1),
+          m_body_jntadr: wp.array(dtype=wp.int32, ndim=1),
+          m_body_jntnum: wp.array(dtype=wp.int32, ndim=1),
+          m_body_parentid: wp.array(dtype=wp.int32, ndim=1),
+          m_body_pos: wp.array(dtype=wp.vec3, ndim=1),
+          m_body_quat: wp.array(dtype=wp.quat, ndim=1),
+          m_jnt_qposadr: wp.array(dtype=wp.int32, ndim=1),
+          m_jnt_type: wp.array(dtype=wp.int32, ndim=1),
+          m_jnt_axis: wp.array(dtype=wp.vec3, ndim=1),
+          m_jnt_pos: wp.array(dtype=wp.vec3, ndim=1),
+          m_qpos0: wp.array(dtype=wp.float32, ndim=1),
+          d_qpos: wp.array(dtype=wp.float32, ndim=2),
+          d_xanchor: wp.array(dtype=wp.vec3, ndim=2),
+          d_xaxis: wp.array(dtype=wp.vec3, ndim=2),
+          d_xmat: wp.array(dtype=wp.mat33, ndim=2),
+          d_xpos: wp.array(dtype=wp.vec3, ndim=2),
+          d_xquat: wp.array(dtype=wp.quat, ndim=2),
+        ):
     worldid, nodeid = wp.tid()
-    bodyid = m.body_tree[leveladr + nodeid]
-    jntadr = m.body_jntadr[bodyid]
-    jntnum = m.body_jntnum[bodyid]
-    qpos = d.qpos[worldid]
+    bodyid = m_body_tree[leveladr + nodeid]
+    jntadr = m_body_jntadr[bodyid]
+    jntnum = m_body_jntnum[bodyid]
+    qpos = d_qpos[worldid]
 
-    if jntnum == 1 and m.jnt_type[jntadr] == 0:
+    if jntnum == 1 and m_jnt_type[jntadr] == 0:
       # free joint
-      qadr = m.jnt_qposadr[jntadr]
+      qadr = m_jnt_qposadr[jntadr]
       # TODO(erikfrey): would it be better to use some kind of wp.copy here?
       xpos = wp.vec3(qpos[qadr], qpos[qadr + 1], qpos[qadr + 2])
       xquat = wp.quat(qpos[qadr + 3], qpos[qadr + 4], qpos[qadr + 5], qpos[qadr + 6])
-      d.xanchor[worldid, jntadr] = xpos
-      d.xaxis[worldid, jntadr] = m.jnt_axis[jntadr]
+      d_xanchor[worldid, jntadr] = xpos
+      d_xaxis[worldid, jntadr] = m_jnt_axis[jntadr]
     else:
       # regular or no joints
       # apply fixed translation and rotation relative to parent
-      pid = m.body_parentid[bodyid]
-      xpos = (d.xmat[worldid, pid] * m.body_pos[bodyid]) + d.xpos[worldid, pid]
-      xquat = math.mul_quat(d.xquat[worldid, pid], m.body_quat[bodyid])
+      pid = m_body_parentid[bodyid]
+      xpos = (d_xmat[worldid, pid] * m_body_pos[bodyid]) + d_xpos[worldid, pid]
+      xquat = math.mul_quat(d_xquat[worldid, pid], m_body_quat[bodyid])
 
       for _ in range(jntnum):
-        qadr = m.jnt_qposadr[jntadr]
-        jnt_type = m.jnt_type[jntadr]
-        jnt_axis = m.jnt_axis[jntadr]
-        xanchor = math.rot_vec_quat(m.jnt_pos[jntadr], xquat) + xpos
+        qadr = m_jnt_qposadr[jntadr]
+        jnt_type = m_jnt_type[jntadr]
+        jnt_axis = m_jnt_axis[jntadr]
+        xanchor = math.rot_vec_quat(m_jnt_pos[jntadr], xquat) + xpos
         xaxis = math.rot_vec_quat(jnt_axis, xquat)
 
         if jnt_type == 1:  # ball
           qloc = wp.quat(
-            d.qpos[worldid, qadr + 0],
-            d.qpos[worldid, qadr + 1],
-            d.qpos[worldid, qadr + 2],
-            d.qpos[worldid, qadr + 3],
+            qpos[qadr + 0],
+            qpos[qadr + 1],
+            qpos[qadr + 2],
+            qpos[qadr + 3],
           )
           xquat = math.mul_quat(xquat, qloc)
           # correct for off-center rotation
-          xpos = xanchor - math.rot_vec_quat(m.jnt_pos[jntadr], xquat)
+          xpos = xanchor - math.rot_vec_quat(m_jnt_pos[jntadr], xquat)
         elif jnt_type == 2:  # slide
-          xpos += xaxis * (d.qpos[worldid, qadr] - m.qpos0[qadr])
+          xpos += xaxis * (qpos[qadr] - m_qpos0[qadr])
         elif jnt_type == 3:  # hinge
-          qpos0 = m.qpos0[qadr]
-          qloc = math.axis_angle_to_quat(jnt_axis, d.qpos[worldid, qadr] - qpos0)
+          qpos0 = m_qpos0[qadr]
+          qloc = math.axis_angle_to_quat(jnt_axis, d_qpos[worldid, qadr] - qpos0)
           xquat = math.mul_quat(xquat, qloc)
           # correct for off-center rotation
-          xpos = xanchor - math.rot_vec_quat(m.jnt_pos[jntadr], xquat)
+          xpos = xanchor - math.rot_vec_quat(m_jnt_pos[jntadr], xquat)
 
-        d.xanchor[worldid, jntadr] = xanchor
-        d.xaxis[worldid, jntadr] = xaxis
+        d_xanchor[worldid, jntadr] = xanchor
+        d_xaxis[worldid, jntadr] = xaxis
         jntadr += 1
 
-    d.xpos[worldid, bodyid] = xpos
-    d.xquat[worldid, bodyid] = wp.normalize(xquat)
-    d.xmat[worldid, bodyid] = math.quat_to_mat(xquat)
+    d_xpos[worldid, bodyid] = xpos
+    d_xquat[worldid, bodyid] = wp.normalize(xquat)
+    d_xmat[worldid, bodyid] = math.quat_to_mat(xquat)
+
+#  @wp.kernel
+#  def _level(m: types.Model, d: types.Data, leveladr: int):
+#    worldid, nodeid = wp.tid()
+#    bodyid = m.body_tree[leveladr + nodeid]
+#    jntadr = m.body_jntadr[bodyid]
+#    jntnum = m.body_jntnum[bodyid]
+#    qpos = d.qpos[worldid]
+#
+#    if jntnum == 1 and m.jnt_type[jntadr] == 0:
+#      # free joint
+#      qadr = m.jnt_qposadr[jntadr]
+#      # TODO(erikfrey): would it be better to use some kind of wp.copy here?
+#      xpos = wp.vec3(qpos[qadr], qpos[qadr + 1], qpos[qadr + 2])
+#      xquat = wp.quat(qpos[qadr + 3], qpos[qadr + 4], qpos[qadr + 5], qpos[qadr + 6])
+#      d.xanchor[worldid, jntadr] = xpos
+#      d.xaxis[worldid, jntadr] = m.jnt_axis[jntadr]
+#    else:
+#      # regular or no joints
+#      # apply fixed translation and rotation relative to parent
+#      pid = m.body_parentid[bodyid]
+#      xpos = (d.xmat[worldid, pid] * m.body_pos[bodyid]) + d.xpos[worldid, pid]
+#      xquat = math.mul_quat(d.xquat[worldid, pid], m.body_quat[bodyid])
+#
+#      for _ in range(jntnum):
+#        qadr = m.jnt_qposadr[jntadr]
+#        jnt_type = m.jnt_type[jntadr]
+#        jnt_axis = m.jnt_axis[jntadr]
+#        xanchor = math.rot_vec_quat(m.jnt_pos[jntadr], xquat) + xpos
+#        xaxis = math.rot_vec_quat(jnt_axis, xquat)
+#
+#        if jnt_type == 1:  # ball
+#          qloc = wp.quat(
+#            d.qpos[worldid, qadr + 0],
+#            d.qpos[worldid, qadr + 1],
+#            d.qpos[worldid, qadr + 2],
+#            d.qpos[worldid, qadr + 3],
+#          )
+#          xquat = math.mul_quat(xquat, qloc)
+#          # correct for off-center rotation
+#          xpos = xanchor - math.rot_vec_quat(m.jnt_pos[jntadr], xquat)
+#        elif jnt_type == 2:  # slide
+#          xpos += xaxis * (d.qpos[worldid, qadr] - m.qpos0[qadr])
+#        elif jnt_type == 3:  # hinge
+#          qpos0 = m.qpos0[qadr]
+#          qloc = math.axis_angle_to_quat(jnt_axis, d.qpos[worldid, qadr] - qpos0)
+#          xquat = math.mul_quat(xquat, qloc)
+#          # correct for off-center rotation
+#          xpos = xanchor - math.rot_vec_quat(m.jnt_pos[jntadr], xquat)
+#
+#        d.xanchor[worldid, jntadr] = xanchor
+#        d.xaxis[worldid, jntadr] = xaxis
+#        jntadr += 1
+#
+#    d.xpos[worldid, bodyid] = xpos
+#    d.xquat[worldid, bodyid] = wp.normalize(xquat)
+#    d.xmat[worldid, bodyid] = math.quat_to_mat(xquat)
 
   wp.launch(_root, dim=(d.nworld), inputs=[m, d])
   for adr, size in zip(m.body_leveladr.numpy(), m.body_levelsize.numpy()):
-    wp.launch(_level, dim=(d.nworld, size), inputs=[m, d, adr])
+    wp.launch(
+      _level,
+      dim=(d.nworld, size),
+      inputs=[
+        adr,
+        m.body_tree,
+        m.body_jntadr,
+        m.body_jntnum,
+        m.body_parentid,
+        m.body_pos,
+        m.body_quat,
+        m.jnt_qposadr,
+        m.jnt_type,
+        m.jnt_axis,
+        m.jnt_pos,
+        m.qpos0,
+        d.qpos,
+        d.xanchor,
+        d.xaxis,
+        d.xmat,
+        d.xpos,
+        d.xquat,
+      ],)
 
 
 def com_pos(m: types.Model, d: types.Data):
