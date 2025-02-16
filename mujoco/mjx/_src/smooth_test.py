@@ -26,7 +26,9 @@ class SmoothTest(absltest.TestCase):
     for arr in (d.xanchor, d.xaxis, d.xquat, d.xpos):
       arr.zero_()
 
-    mjx.kinematics(m, d)
+    wc = mjx.WarpCarry()
+    wc.kin_graph = None
+    mjx.kinematics(m, d, wc)
 
     _assert_eq(d.xanchor.numpy()[0], mjd.xanchor, 'xanchor')
     _assert_eq(d.xaxis.numpy()[0], mjd.xaxis, 'xaxis')

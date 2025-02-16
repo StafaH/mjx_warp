@@ -5,6 +5,9 @@ class vec10f(wp.types.vector(length=10, dtype=wp.float32)):
 
 vec10 = vec10f
 
+class WarpCarry:
+  kin_graph: wp.context.Graph
+
 @wp.struct
 class Option:
   gravity: wp.vec3

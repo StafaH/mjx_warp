@@ -55,22 +55,24 @@ def benchmark(
 
   mx = io.put_model(m)
   dx = io.make_data(m, nworld=batch_size)
-
+  wc = types.WarpCarry()
+  wc.kin_graph = None
   wp.clear_kernel_cache()
   jit_beg = time.perf_counter()
-  fn(mx, dx)
+  fn(mx, dx, wc)
   jit_end = time.perf_counter()
   jit_duration = jit_end - jit_beg
   wp.synchronize()
 
   # capture the whole smooth.kinematic() function as a CUDA graph
-  with wp.ScopedCapture() as capture:
-    fn(mx, dx)
-  graph = capture.graph
+  # with wp.ScopedCapture() as capture:
+  #   fn(mx, dx)
+  # graph = capture.graph
 
   run_beg = time.perf_counter()
   for _ in range(nstep):
-    wp.capture_launch(graph)
+    #wp.capture_launch(graph)
+    fn(mx, dx, wc)
   wp.synchronize()
   run_end = time.perf_counter()
   run_duration = run_end - run_beg

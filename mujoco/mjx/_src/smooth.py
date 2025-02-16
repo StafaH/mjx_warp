@@ -2,8 +2,9 @@ import warp as wp
 from . import math
 from . import types
 
+TILE_THREADS = 64
 
-def kinematics(m: types.Model, d: types.Data):
+def kinematics(m: types.Model, d: types.Data, wc: types.WarpCarry):
   """Forward kinematics."""
 
   @wp.kernel
@@ -72,9 +73,14 @@ def kinematics(m: types.Model, d: types.Data):
     d.xquat[worldid, bodyid] = wp.normalize(xquat)
     d.xmat[worldid, bodyid] = math.quat_to_mat(xquat)
 
-  wp.launch(_root, dim=(d.nworld), inputs=[m, d])
-  for adr, size in zip(m.body_leveladr.numpy(), m.body_levelsize.numpy()):
-    wp.launch(_level, dim=(d.nworld, size), inputs=[m, d, adr])
+  if wc.kin_graph is None:
+    with wp.ScopedCapture(device="cuda") as capture:
+      wp.launch(_root, dim=(d.nworld), inputs=[m, d])
+      for adr, size in zip(m.body_leveladr.numpy(), m.body_levelsize.numpy()):
+        wp.launch(_level, dim=(d.nworld, size), inputs=[m, d, adr])
+    wc.kin_graph = capture.graph
+  
+  wp.capture_launch(wc.kin_graph)
 
 
 def com_pos(m: types.Model, d: types.Data):
